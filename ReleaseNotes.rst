@@ -2,6 +2,11 @@
 Release Notes
 =============
 
+1.0.2
+=====
+
+Make error messages more human readable
+
 1.0.1
 =====
 

@@ -105,7 +105,7 @@ class Core(object):
         Log.debug("starting core")
 
         errors = self._start_validate(self.source)
-        self.validation_errors = errors
+        self.validation_errors = [str(error) for error in errors]
 
         if errors is None or len(errors) == 0:
             Log.info("validation.valid")
@@ -114,7 +114,8 @@ class Core(object):
             Log.error(" --- All found errors ---")
             Log.error(errors)
             if raise_exception:
-                raise SchemaError("validation.invalid : {}".format(errors))
+                raise SchemaError("Schema validation failed:\n - {error_msg}.".format(
+                    error_msg='.\n - '.join(self.validation_errors)))
             else:
                 Log.error("Errors found but will not raise exception...")
 
@@ -178,13 +179,21 @@ class Core(object):
     def _validate_include(self, value, rule, path, errors=[], done=None):
         # TODO: It is difficult to get a good test case to trigger this if case
         if rule._include_name is None:
-            errors.append("Include name not valid : {} : {}".format(path, value))
+            errors.append(SchemaError.SchemaErrorEntry(
+                msg='Include name not valid',
+                path=path,
+                value=value))
             return
 
         include_name = rule._include_name
         partial_schema_rule = pykwalify.partial_schemas.get(include_name, None)
         if not partial_schema_rule:
-            errors.append("No partial schema found for name : {} : Existing partial schemas: {}".format(include_name, ", ".join(sorted(pykwalify.partial_schemas.keys()))))
+            errors.append(SchemaError.SchemaErrorEntry(
+                msg="Cannot find partial schema with name '{include_name}'. Existing partial schemas: '{existing_schemas}'. Path: '{path}'",
+                path=path,
+                value=value,
+                include_name=include_name,
+                existing_schemas=", ".join(sorted(pykwalify.partial_schemas.keys()))))
             return
 
         self._validate(value, partial_schema_rule, path, errors, done)
@@ -249,7 +258,12 @@ class Core(object):
                         if val in table:
                             curr_path = "{}/{}/{}".format(path, j, v)
                             prev_path = "{}/{}/{}".format(path, table[val], v)
-                            errors.append("value.notunique :: value: {} : {} : {}".format(val, curr_path, prev_path))
+                            errors.append(SchemaError.SchemaErrorEntry(
+                                msg="Value '{duplicate}' is not unique. Previous path: '{prev_path}'. Path: '{path}'",
+                                path=curr_path,
+                                value=value,
+                                duplicate=val,
+                                prev_path=prev_path))
                         else:
                             table[val] = j
                         j += 1
@@ -263,7 +277,12 @@ class Core(object):
                 if val in table:
                     curr_path = "{}/{}".format(path, j)
                     prev_path = "{}/{}".format(path, table[val])
-                    errors.append("value.notunique :: value: {} : {} : {}".format(val, curr_path, prev_path))
+                    errors.append(SchemaError.SchemaErrorEntry(
+                        msg="Value '{duplicate}' is not unique. Previous path: '{prev_path}'. Path: '{path}'",
+                        path=curr_path,
+                        value=value,
+                        duplicate=val,
+                        prev_path=prev_path))
                 else:
                     table[val] = j
 
@@ -277,7 +296,7 @@ class Core(object):
         Log.debug(" + Map: {}".format(rule._mapping))
 
         if rule._mapping is None:
-            Log.debug(" + No rule to apply, prolly because of allowempty: True")
+            Log.debug(" + No rule to apply, probably because of allowempty: True")
             return
 
         m = rule._mapping
@@ -299,7 +318,11 @@ class Core(object):
 
         for k, rr in m.items():
             if rr._required and k not in value:
-                errors.append("required.nokey : {} : {}".format(k, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Cannot find required key '{key}'. Path: '{path}'",
+                    path=path,
+                    value=value,
+                    key=k))
             if k not in value and rr._default is not None:
                 value[k] = rr._default
 
@@ -329,18 +352,32 @@ class Core(object):
                         Log.debug("Matched atleast one regex")
                     else:
                         Log.debug("No regex matched")
-                        errors.append("key.regex.nomatch.any : {} : {}".format(k, "  ".join([mm[0]._map_regex_rule for mm in regex_mappings])))
+                        errors.append(SchemaError.SchemaErrorEntry(
+                            msg="Key '{key}' does not match any regex '{regex}'. Path: '{path}'",
+                            path=path,
+                            value=value,
+                            key=k,
+                            regex="  ".join([mm[0]._map_regex_rule for mm in regex_mappings])))
                 elif rule._matching_rule == "all":
                     if all(sub_regex_result):
                         Log.debug("Matched all regex rules")
                     else:
                         Log.debug("Did not match all regex rules")
-                        errors.append("key.regex.nomatch.all : {} : {}".format(k, "  ".join([mm[0]._map_regex_rule for mm in regex_mappings])))
+                        errors.append(SchemaError.SchemaErrorEntry(
+                            msg="Key '{key}' does not match all regex '{regex}'. Path: '{path}'",
+                            path=path,
+                            value=value,
+                            key=k,
+                            regex="  ".join([mm[0]._map_regex_rule for mm in regex_mappings])))
                 else:
                     Log.debug("No mapping rule defined")
             elif r is None:
                 if not rule._allowempty_map:
-                    errors.append("key.undefined : {} : {}".format(k, path))
+                    errors.append(SchemaError.SchemaErrorEntry(
+                        msg="Key '{key}' was not defined. Path: '{path}'",
+                        path=path,
+                        value=value,
+                        key=k))
             else:
                 if not r._schema:
                     # validate recursively
@@ -358,7 +395,10 @@ class Core(object):
 
         if rule._enum is not None:
             if value not in rule._enum:
-                errors.append("enum.notexists : {} : {}".format(value, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Enum '{value}' does not exist. Path: '{path}'",
+                    path=path,
+                    value=value))
 
         # Set default value
         if rule._default and value is None:
@@ -372,7 +412,11 @@ class Core(object):
         if rule._pattern is not None:
             res = re.match(rule._pattern, str(value))
             if res is None:  # Not matching
-                errors.append("pattern.unmatch : {} --> {} : {}".format(rule._pattern, value, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Value '{value}' does not match pattern '{pattern}'. Path: '{path}'",
+                    path=path,
+                    value=value,
+                    pattern=rule._pattern))
 
         if rule._range is not None:
             if not is_scalar(value):
@@ -415,19 +459,39 @@ class Core(object):
 
         if max_ is not None:
             if max_ < value:
-                errors.append("{}.range.toolarge : {} < {} : {}".format(prefix, max_, value, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Type '{prefix}' has size of '{value}', greater than max limit '{max_}'. Path: '{path}'",
+                    path=path,
+                    value=value,
+                    prefix=prefix,
+                    max_=max_))
 
         if min_ is not None:
             if min_ > value:
-                errors.append("{}.range.toosmall : {} > {} : {}".format(prefix, min_, value, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Type '{prefix}' has size of '{value}', less than min limit '{min_}'. Path: '{path}'",
+                    path=path,
+                    value=value,
+                    prefix=prefix,
+                    min_=min_))
 
         if max_ex is not None:
             if max_ex <= value:
-                errors.append("{}.range.tolarge-ex : {} <= {} : {}".format(prefix, max_ex, value, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Type '{prefix}' has size of '{value}', greater than or equals to max limit(exclusive) '{max_ex}'. Path: '{path}'",
+                    path=path,
+                    value=value,
+                    prefix=prefix,
+                    max_ex=max_ex))
 
         if min_ex is not None:
             if min_ex >= value:
-                errors.append("{}.range.toosmall-ex : {} >= {} : {}".format(prefix, min_ex, value, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Type '{prefix}' has size of '{value}', less than or equals to min limit(exclusive) '{min_ex}'. Path: '{path}'",
+                    path=path,
+                    value=value,
+                    prefix=prefix,
+                    min_ex=min_ex))
 
     def _validate_scalar_type(self, value, t, errors, path):
         Log.debug("Core scalar: validating scalar type : {}".format(t))
@@ -435,7 +499,11 @@ class Core(object):
 
         try:
             if not tt[t](value):
-                errors.append("Value: {} is not of type '{}' : {}".format(value, t, path))
+                errors.append(SchemaError.SchemaErrorEntry(
+                    msg="Value '{value}' is not of type '{scalar_type}'. Path: '{path}'",
+                    path=path,
+                    value=value,
+                    scalar_type=t))
         except Exception:
             # Type not found in map
             raise Exception("Unknown type check: {} : {} : {}".format(path, value, t))
